@@ -17,7 +17,7 @@
 #define BUTTON_GPIO 0  // BOOT button
 
 static bool last_button_state = false;
-
+uint16_t boot_debug = 0;
 /**
  * @brief Connection status callback
  */
@@ -56,30 +56,30 @@ void ble_data_received_callback(uint8_t device_index, uint8_t *data, uint16_t le
  * @brief Button task for testing transmission
  */
 void button_task(void *arg) {
-    uint32_t send_counter = 0;
-    
     while (1) {
         bool current_state = (gpio_get_level(BUTTON_GPIO) == 0);
         
+        // 检测按键按下(下降沿)
         if (current_state && !last_button_state) {
-            vTaskDelay(pdMS_TO_TICKS(50)); // Debounce
+            vTaskDelay(pdMS_TO_TICKS(50)); // 消抖
             
             if (gpio_get_level(BUTTON_GPIO) == 0) {
                 ESP_LOGI(TAG, "Button Pressed!");
                 
                 if (BLE_IsConnected()) {
-                    char test_msg[64];
-                    snprintf(test_msg, sizeof(test_msg), "ESP32 Broadcast #%ld", send_counter++);
+                    // 模拟串口接收到数据
+                    const char *test_data = "1hello,HC08_1";
+                    Serial_RxLen = strlen(test_data);
+                    memcpy(Serial_RxPacket, test_data, Serial_RxLen);
+                    Serial_RxPacket[Serial_RxLen] = '\0'; // 添加字符串结束符
+                    Serial_RxFlag = 1; // 触发主循环处理
                     
-                    if (BLE_SendString(test_msg) == ESP_OK) {
-                        ESP_LOGI(TAG, "✓ Broadcasted: %s", test_msg);
-                    } else {
-                        ESP_LOGE(TAG, "✗ Broadcast failed");
-                    }
+                    ESP_LOGI(TAG, "✓ Simulated UART data: %s", Serial_RxPacket);
                 } else {
                     ESP_LOGW(TAG, "Cannot send: No devices connected");
                 }
                 
+                // 等待松开,避免重复触发
                 vTaskDelay(pdMS_TO_TICKS(300));
             }
         }
@@ -88,7 +88,6 @@ void button_task(void *arg) {
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
-
 /**
  * @brief Main application entry
  */
@@ -135,17 +134,28 @@ void app_main(void) {
         return;
     }
     
-    // Main loop: Forward Serial -> BLE
     while (1) {
         if (Serial_RxFlag) {
             if (BLE_IsConnected()) {
-                // Forward UART data to ALL connected HC-08s
-                BLE_SendData((uint8_t*)Serial_RxPacket, Serial_RxLen);
-                // ESP_LOGI(TAG, "UART -> BLE: %d bytes", Serial_RxLen);
+                // 简单协议: 首字节指定目标
+                // '1' -> HC08_1, '2' -> HC08_2, 其他 -> 广播
+                if (Serial_RxPacket[0] == '1') {
+                    // 发送给 HC08_1 (去掉首字节'1')
+                    BLE_SendDataToDevice(0, (uint8_t*)&Serial_RxPacket[1], Serial_RxLen - 1);
+                    ESP_LOGI(TAG, "→ HC08_1: %s", &Serial_RxPacket[1]);
+                } else if (Serial_RxPacket[0] == '2') {
+                    // 发送给 HC08_2 (去掉首字节'2')
+                    BLE_SendDataToDevice(1, (uint8_t*)&Serial_RxPacket[1], Serial_RxLen - 1);
+                    ESP_LOGI(TAG, "→ HC08_2: %s", &Serial_RxPacket[1]);
+                } else {
+                    // 广播给所有设备
+                    BLE_SendData((uint8_t*)Serial_RxPacket, Serial_RxLen);
+                    ESP_LOGI(TAG, "→ Broadcast: %s", Serial_RxPacket);
+                }
             } else {
                 ESP_LOGW(TAG, "UART received but no BLE connection");
             }
-            Serial_RxFlag = 0;
+            Serial_RxFlag = 0; // 清除标志
         }
         vTaskDelay(pdMS_TO_TICKS(10));
     }

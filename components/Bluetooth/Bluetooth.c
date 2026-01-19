@@ -542,3 +542,40 @@ void BLE_GetMacAddress(uint8_t *mac) {
         memcpy(mac, addr, 6);
     }
 }
+
+//实现单独发送到指定设备的函数
+esp_err_t BLE_SendDataToDevice(uint8_t device_index, uint8_t *data, uint16_t len) {
+    if (!data || len == 0) return ESP_ERR_INVALID_ARG;
+    if (device_index >= TARGET_DEVICE_COUNT) return ESP_ERR_INVALID_ARG;
+    
+    // 检查指定设备是否已连接
+    if (!remote_devices[device_index].connected || 
+        remote_devices[device_index].char_handle == INVALID_HANDLE) {
+        ESP_LOGW(TAG, "Device %d not connected or no valid handle", device_index);
+        return ESP_FAIL;
+    }
+    
+    // 只发送给指定设备
+    esp_err_t ret = esp_ble_gattc_write_char(
+        remote_devices[device_index].gattc_if,
+        remote_devices[device_index].conn_id,
+        remote_devices[device_index].char_handle,
+        len,
+        data,
+        ESP_GATT_WRITE_TYPE_NO_RSP,
+        ESP_GATT_AUTH_REQ_NONE
+    );
+    
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "Sent %d bytes to HC08_%d", len, device_index + 1);
+    } else {
+        ESP_LOGE(TAG, "Failed to send to HC08_%d, error: %d", device_index + 1, ret);
+    }
+    
+    return ret;
+}
+
+esp_err_t BLE_SendStringToDevice(uint8_t device_index, const char *str) {
+    if (!str) return ESP_ERR_INVALID_ARG;
+    return BLE_SendDataToDevice(device_index, (uint8_t*)str, strlen(str));
+}

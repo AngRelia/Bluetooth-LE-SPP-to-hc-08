@@ -96,4 +96,22 @@ void BLE_GetMacAddress(uint8_t *mac);
  */
 esp_err_t BLE_StartScanning(void);
 
+/**
+ * @brief Send data to specific HC-08 device
+ * @param device_index 0 for HC08_1, 1 for HC08_2
+ * @param data Data pointer
+ * @param len Data length
+ * @return ESP_OK on success
+ */
+esp_err_t BLE_SendDataToDevice(uint8_t device_index, uint8_t *data, uint16_t len);
+
+/**
+ * @brief Send string to specific HC-08 device
+ * @param device_index 0 for HC08_1, 1 for HC08_2
+ * @param str String pointer
+ * @return ESP_OK on success
+ */
+esp_err_t BLE_SendStringToDevice(uint8_t device_index, const char *str);
+
+
 #endif /* __BLUETOOTH_H__ */
