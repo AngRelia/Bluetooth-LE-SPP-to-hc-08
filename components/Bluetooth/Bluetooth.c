@@ -5,6 +5,7 @@
 
 #include "Bluetooth.h"
 #include <string.h>
+#include <stdlib.h>
 #include "esp_log.h"
 #include "esp_bt.h"
 #include "esp_bt_main.h"
@@ -18,52 +19,110 @@
 #define TAG "BLE_CENTRAL"
 
 /* HC-08 Target Names */
-static const char *remote_device_names[] = {"HC08_1", "HC08_2"};
-#define TARGET_DEVICE_COUNT (sizeof(remote_device_names) / sizeof(remote_device_names[0]))
+static const char *remote_device_names[] = {"HC08_1", "HC08_2"};       //通过名字识别设备
+#define TARGET_DEVICE_COUNT (sizeof(remote_device_names) / sizeof(remote_device_names[0]))  //目标设备数量
 
 /* Internal State */
-static bool is_scanning = false;
-static ble_conn_callback_t user_conn_cb = NULL;
-static ble_data_callback_t user_data_cb = NULL;
+static bool is_scanning = false;    //扫描状态
+static ble_conn_callback_t user_conn_cb = NULL; //用户连接回调
+static ble_data_callback_t user_data_cb = NULL; //用户数据回调
 
 /* Device Structure */
 typedef struct {
-    bool connected;
-    uint16_t conn_id;
-    uint16_t gattc_if;
-    esp_bd_addr_t remote_bda;
-    uint16_t service_start_handle;
-    uint16_t service_end_handle;
-    uint16_t char_handle;
-    bool found;
-    char name[32];
-} remote_device_t;
+    bool connected;                 //连接状态
+    uint16_t conn_id;               //连接ID
+    uint16_t gattc_if;              //GATT客户端接口
+    esp_bd_addr_t remote_bda;       //远程设备地址
+    uint16_t service_start_handle;  //服务起始句柄
+    uint16_t service_end_handle;    //服务结束句柄
+    uint16_t char_handle;           //特征句柄
+    bool found;                     //是否找到目标服务和特征
+    char name[32];                  //设备名称
+} remote_device_t;      //远程设备结构体
 
-static remote_device_t remote_devices[TARGET_DEVICE_COUNT];
+static remote_device_t remote_devices[TARGET_DEVICE_COUNT];     //创建同等数量的远程设备结构体数组
 
-#define PROFILE_APP_ID 0
-#define INVALID_HANDLE 0
+#define PROFILE_APP_ID 0           //配置文件应用ID
+#define INVALID_HANDLE 0                //无效句柄
 
-static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param);
+/* 回调函数 */
+//GAP 层回调。处理扫描、发现广播、连接参数更新、停止扫描等链路层事件
+static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param);    
+//GATT Client 回调。处理连接后服务发现、特征发现、注册通知、收到通知数据等 GATT 事件。
 static void esp_gattc_cb(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp_ble_gattc_cb_param_t *param);
+/* 工具函数 */
+//普通函数。由 `ESP_GATTC_REG_FOR_NOTIFY_EVT` 调用，写 0x2902(CCCD) 真正开启 notify。
+static void enable_notify_cccd(esp_gatt_if_t gattc_if, uint16_t conn_id, int dev_idx);
 
+//GATT Client 应用
 struct gattc_profile_inst {
-    esp_gattc_cb_t gattc_cb;
-    uint16_t gattc_if;
-    uint16_t app_id;
-    uint16_t conn_id;
-    uint16_t service_start_handle;
-    uint16_t service_end_handle;
-    uint16_t char_handle;
-    esp_bd_addr_t remote_bda;
-};
+    esp_gattc_cb_t gattc_cb;    //GATT客户端回调函数
+    uint16_t gattc_if;              //GATT客户端接口
+    uint16_t app_id;                //应用ID
+    uint16_t conn_id;               //连接ID
+    uint16_t service_start_handle;  //服务起始句柄
+    uint16_t service_end_handle;    //服务结束句柄
+    uint16_t char_handle;           //特征句柄
+    esp_bd_addr_t remote_bda;       //远程设备地址
+};  //
 
+//Profile 管理结构
 static struct gattc_profile_inst gl_profile_tab[1] = {
     [PROFILE_APP_ID] = {
         .gattc_cb = esp_gattc_cb,
         .gattc_if = ESP_GATT_IF_NONE,
     },
 };
+
+static void enable_notify_cccd(esp_gatt_if_t gattc_if, uint16_t conn_id, int dev_idx) {
+    // 1) Count descriptors under the remote characteristic (HC-08 FFE1).
+    uint16_t count = 0;
+    esp_gatt_status_t status = esp_ble_gattc_get_attr_count(
+        gattc_if,
+        conn_id,
+        ESP_GATT_DB_DESCRIPTOR,
+        remote_devices[dev_idx].service_start_handle,
+        remote_devices[dev_idx].service_end_handle,
+        remote_devices[dev_idx].char_handle,
+        &count);
+    if (status != ESP_GATT_OK || count == 0) {
+        ESP_LOGW(TAG, "[%s] CCCD not found (count=%u, status=%d)", remote_devices[dev_idx].name, count, status);
+        return;
+    }
+
+    // 2) Fetch the CCCD (0x2902). This descriptor belongs to the peer (HC-08).
+    esp_gattc_descr_elem_t *descr_result = (esp_gattc_descr_elem_t *)malloc(sizeof(esp_gattc_descr_elem_t) * count);
+    if (!descr_result) {
+        ESP_LOGE(TAG, "CCCD alloc failed");
+        return;
+    }
+
+    status = esp_ble_gattc_get_descr_by_char_handle(
+        gattc_if,
+        conn_id,
+        remote_devices[dev_idx].char_handle,
+        (esp_bt_uuid_t){.len = ESP_UUID_LEN_16, .uuid = {.uuid16 = ESP_GATT_UUID_CHAR_CLIENT_CONFIG}},
+        descr_result,
+        &count);
+
+    if (status == ESP_GATT_OK && count > 0) {
+        // 3) Write 0x0001 to CCCD: enable NOTIFY from the peer to ESP32.
+        uint8_t notify_en[2] = {0x01, 0x00};
+        esp_ble_gattc_write_char_descr(
+            gattc_if,
+            conn_id,
+            descr_result[0].handle,
+            sizeof(notify_en),
+            notify_en,
+            ESP_GATT_WRITE_TYPE_RSP,
+            ESP_GATT_AUTH_REQ_NONE);
+        ESP_LOGI(TAG, "[%s] CCCD write enable notify", remote_devices[dev_idx].name);
+    } else {
+        ESP_LOGW(TAG, "[%s] CCCD query failed (status=%d, count=%u)", remote_devices[dev_idx].name, status, count);
+    }
+
+    free(descr_result);
+}
 
 static int find_device_index_by_conn_id(uint16_t conn_id) {
     for (int i = 0; i < TARGET_DEVICE_COUNT; i++) {
@@ -302,11 +361,36 @@ static void esp_gattc_cb(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp
         if (user_conn_cb) user_conn_cb(BLE_IsConnected());
         break;
 
+    case ESP_GATTC_REG_FOR_NOTIFY_EVT: {
+        int idx = -1;
+        for (int i = 0; i < TARGET_DEVICE_COUNT; i++) {
+            if (remote_devices[i].connected &&
+                remote_devices[i].char_handle == p_data->reg_for_notify.handle) {
+                idx = i;
+                break;
+            }
+        }
+        if (idx != -1 && p_data->reg_for_notify.status == ESP_GATT_OK) {
+            enable_notify_cccd(gattc_if, remote_devices[idx].conn_id, idx);
+        } else if (idx != -1) {
+            ESP_LOGW(TAG, "[%s] reg notify failed, status=%d", remote_devices[idx].name, p_data->reg_for_notify.status);
+        }
+        break;
+    }
+
     case ESP_GATTC_NOTIFY_EVT:
         {
             int idx = find_device_index_by_conn_id(p_data->notify.conn_id);
-            if (idx != -1 && user_data_cb) {
-                user_data_cb((uint8_t)idx, p_data->notify.value, p_data->notify.value_len);
+            if (idx != -1) {
+                ESP_LOGI(TAG, "Notify from %s, len=%d", remote_devices[idx].name, p_data->notify.value_len);
+                if (p_data->notify.value_len > 0) {
+                    esp_log_buffer_hex(TAG, p_data->notify.value, p_data->notify.value_len);
+                }
+                if (user_data_cb) {
+                    user_data_cb((uint8_t)idx, p_data->notify.value, p_data->notify.value_len);
+                }
+            } else {
+                ESP_LOGW(TAG, "Notify from unknown conn_id=%d", p_data->notify.conn_id);
             }
         }
         break;
