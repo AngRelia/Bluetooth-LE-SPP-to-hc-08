@@ -49,7 +49,8 @@ void ble_data_received_callback(uint8_t device_index, uint8_t *data, uint16_t le
     // Transparently forward to UART
     // We could add a prefix here if we wanted to distinguish sources on the UART side,
     // e.g., Serial_Printf("[HC08_%d]: ", device_index + 1);
-    Serial_SendArray(data, len);
+    //Serial_SendArray(data, len);
+    Serial_Printf("%s", data);
 }
 
 /**
@@ -142,10 +143,12 @@ void app_main(void) {
                 if (Serial_RxPacket[0] == '1') {
                     // 发送给 HC08_1 (去掉首字节'1')
                     BLE_SendDataToDevice(0, (uint8_t*)&Serial_RxPacket[1], Serial_RxLen - 1);
+                    BLE_SendStringToDevice(0, "\r\n"); // 添加换行
                     ESP_LOGI(TAG, "→ HC08_1: %s", &Serial_RxPacket[1]);
                 } else if (Serial_RxPacket[0] == '2') {
                     // 发送给 HC08_2 (去掉首字节'2')
                     BLE_SendDataToDevice(1, (uint8_t*)&Serial_RxPacket[1], Serial_RxLen - 1);
+                    BLE_SendStringToDevice(1, "\r\n"); // 添加换行
                     ESP_LOGI(TAG, "→ HC08_2: %s", &Serial_RxPacket[1]);
                 } else {
                     // 广播给所有设备
